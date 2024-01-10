@@ -19,6 +19,12 @@ import src.deit as deit
 from src.data_manager import (
     init_data,
 )
+import models_vit
+import sys
+sys.path.insert(0, '..')
+import models_mae
+#import models_mae_img2text
+
 
 logging.basicConfig()
 logger = logging.getLogger()
@@ -44,6 +50,7 @@ parser.add_argument(
 parser.add_argument(
     '--preload', action='store_true',
     help='whether to preload embs if possible')
+parser.set_defaults(preload=True)
 parser.add_argument(
     '--fname', type=str,
     help='model architecture')
@@ -75,6 +82,11 @@ parser.add_argument(
     default=None,
     help='name of dataset to evaluate on')
 
+parser.add_argument(
+    '--model', type=str,
+    default='model',
+    choices=["model", "model_ema"])
+
 logging.basicConfig()
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -101,7 +113,7 @@ def main(
     model_name=None,
     normalize=True,
     device_str='cuda:0'
-):
+):  
     device = torch.device(device_str)
     if 'cuda' in device_str:
         torch.cuda.set_device(device)
@@ -169,22 +181,16 @@ def main(
         }, train_embs_path)
         logger.info(f'saved train embs of shape {embs.shape}')
     # -- Normalize embeddings
-    cyan.preprocess(embs, normalize=normalize, columns=False, centering=True)
+    from cyanure.data_processing import preprocess
+    preprocess(embs, normalize=normalize, columns=False, centering=True)
 
     # -- Fit Logistic Regression Classifier
-    classifier = cyan.MultiClassifier(loss='multiclass-logistic', penalty=penalty, fit_intercept=False)
+    from cyanure.estimators import Classifier as MultiClassifier
     lambd /= len(embs)
+    classifier = MultiClassifier(loss='multiclass-logistic', penalty=penalty, fit_intercept=False, lambda_1=lambd,lambda_2=lambd,)
     classifier.fit(
         embs.numpy(),
-        labs.numpy(),
-        it0=10,
-        lambd=lambd,
-        lambd2=lambd,
-        nthreads=-1,
-        tol=1e-3,
-        solver='auto',
-        seed=0,
-        max_epochs=300)
+        labs.numpy())
 
     # -- Evaluate and log
     train_score = classifier.score(embs.numpy(), labs.numpy())
@@ -211,7 +217,8 @@ def main(
         }, test_embs_path)
         logger.info(f'saved test embs of shape {test_embs.shape}')
     # -- Normalize embeddings
-    cyan.preprocess(test_embs, normalize=normalize, columns=False, centering=True)
+    from cyanure.data_processing import preprocess
+    preprocess(test_embs, normalize=normalize, columns=False, centering=True)
 
     # -- Evaluate and log
     test_score = classifier.score(test_embs.numpy(), test_labs.numpy())
@@ -237,9 +244,9 @@ def make_embeddings(
         for itr, (imgs, labels) in enumerate(data_loader):
             imgs = imgs.to(device)
             with torch.no_grad():
-                z = encoder.forward_blocks(imgs, blocks, mask_frac).cpu()
+                z = encoder.linear_prob_forward(imgs).cpu()
             labels = labels.cpu()
-            z_mem.append(z)
+            z_mem.append(z.mean(dim=1))
             l_mem.append(labels)
             if itr % 50 == 0:
                 logger.info(f'[{itr}/{ipe}]')
@@ -281,12 +288,17 @@ def init_model(
     pretrained,
     model_name,
 ):
-    encoder = deit.__dict__[model_name]()
-    encoder.fc = None
-    encoder.to(device)
-    encoder = load_pretrained(encoder=encoder, pretrained=pretrained)
+    if "ViP" in args.pretrained or "VIP" in args.pretrained or "vip" in args.pretrained:
+        print("ViP loading")
+        model = models_vit.__dict__[args.model_name]()
+    else:
+        model = models_mae.__dict__[args.model_name](text_max_length=40)
+    device = torch.device("cuda")
+    checkpoint = torch.load(args.pretrained+args.fname, map_location='cpu')
+    model.load_state_dict(checkpoint[args.model],strict=False)
+    model.to(device)
 
-    return encoder
+    return model
 
 
 if __name__ == '__main__':
